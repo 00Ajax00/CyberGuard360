@@ -3,37 +3,51 @@ import mongoose from 'mongoose';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import config from './config/config.js';
+
+// Routes
 import authRoutes from './routes/auth.js';
 import scanRoutes from './routes/scan.js';
 import reportRoutes from './routes/report.js';
 import historyRoutes from './routes/history.js';
-import config from './config/config.js';
 
-// Initialize Express app
+// Initialize Express
 const app = express();
 
+// MongoDB Connection
+mongoose.set('strictQuery', false); // Fix deprecation warning
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(config.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      retryWrites: true,
+      w: 'majority'
+    });
+    console.log('Connected to MongoDB');
+  } catch (error) {
+    console.error('MongoDB connection error:', error);
+    process.exit(1);
+  }
+};
+
 // Middleware
+app.set('trust proxy', 1); // Fix rate limit warning
 app.use(helmet());
 app.use(cors({
   origin: config.CORS_ORIGINS.split(',')
 }));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 app.use(limiter);
-
-// Database connection
-mongoose.connect(config.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
-.then(() => console.log('Connected to MongoDB'))
-.catch(err => console.error('MongoDB connection error:', err));
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -41,12 +55,12 @@ app.use('/api/scan', scanRoutes);
 app.use('/api/report', reportRoutes);
 app.use('/api/history', historyRoutes);
 
-// Health check endpoint
+// Health check
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy' });
 });
 
-// Error handling middleware
+// Error handling
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ error: 'Internal server error' });
@@ -54,6 +68,12 @@ app.use((err, req, res, next) => {
 
 // Start server
 const PORT = config.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+
+const startServer = async () => {
+  await connectDB();
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+};
+
+startServer();

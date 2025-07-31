@@ -1,11 +1,11 @@
 import mongoose from 'mongoose';
 
 const vulnerabilitySchema = new mongoose.Schema({
-  type: { type: String, required: true }, // e.g., 'XSS', 'CSRF', 'OutdatedLib'
+  type: { type: String, required: true },
   description: { type: String, required: true },
   severity: { type: String, enum: ['low', 'medium', 'high'], required: true },
   cveId: { type: String },
-  source: { type: String } // e.g., 'Retire.js', 'Heuristic', 'VirusTotal'
+  source: { type: String }
 });
 
 const scanResultSchema = new mongoose.Schema({
@@ -21,7 +21,7 @@ const scanResultSchema = new mongoose.Schema({
   timestamp: { type: Date, default: Date.now }
 });
 
-// Indexes for faster queries
+// Add indexes for performance
 scanResultSchema.index({ userId: 1, timestamp: -1 });
 scanResultSchema.index({ url: 1 });
 
