@@ -9,12 +9,15 @@ export default function authenticate(req, res, next) {
     return res.status(401).json({ error: 'Authentication required' });
   }
 
-  jwt.verify(token, config.JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired token' });
-    }
-    
-    req.user = user;
-    next();
-  });
+jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+  if (err) {
+    console.error('JWT Verify Error:', err.message);
+    return res.status(403).json({ 
+      error: 'Invalid or expired token',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+  }
+  req.user = decoded;
+  next();
+});
 }
