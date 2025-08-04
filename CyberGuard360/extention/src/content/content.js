@@ -1,66 +1,67 @@
-// Content script for analyzing web pages
-import { analyzeScripts } from './scripts.js';
-import { analyzeForms } from './forms.js';
-import { analyzeLinks } from './links.js';
-import { sendAnalysisResults } from './communication.js';
+let redirectCount = 0;
+let lastUrl = location.href;
 
-class PageAnalyzer {
-  constructor() {
-    this.scripts = [];
-    this.forms = [];
-    this.links = [];
-    this.userBehavior = {
-      formSubmissions: 0,
-      linkClicks: 0,
-      redirects: 0
-    };
-  }
+// --- Phishing Behavior Detection ---
 
-  async analyzePage() {
+// 1. Monitor for rapid redirects
+const navigationObserver = new PerformanceObserver((list) => {
+  list.getEntries().forEach((entry) => {
+    if (entry.type === 'navigate') {
+      redirectCount++;
+      setTimeout(() => redirectCount = 0, 5000); // Reset count after 5 seconds
+    }
+  });
+});
+navigationObserver.observe({ type: "navigation", buffered: true });
+
+
+// 2. Monitor form submissions for suspicious inputs
+document.addEventListener('submit', (event) => {
+  const form = event.target;
+  const inputs = form.querySelectorAll('input[type="text"], input[type="email"], input[type="password"]');
+  let hasSuspiciousInput = false;
+
+  inputs.forEach(input => {
+    // Heuristic: check if input value looks like a URL
     try {
-      this.scripts = analyzeScripts();
-      this.forms = analyzeForms();
-      this.links = analyzeLinks();
-      
-      this.setupBehaviorTracking();
-      
-      const results = {
-        url: window.location.href,
-        scripts: this.scripts,
-        forms: this.forms,
-        links: this.links,
-        initialBehavior: this.userBehavior
+      new URL(input.value);
+      hasSuspiciousInput = true;
+    } catch (_) {
+      // Not a valid URL, ignore
+    }
+  });
+
+  if (hasSuspiciousInput) {
+    chrome.storage.local.set({ 'behavior_suspiciousFormInput': true });
+  }
+}, true);
+
+
+// --- Data Extraction for Scanning ---
+
+// Send page data to the popup when it requests it
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'getPageDataForScan') {
+    // Extract all script sources
+    const scripts = Array.from(document.scripts).map(s => s.src).filter(Boolean);
+    
+    // Get behavior data from local storage
+    chrome.storage.local.get(['behavior_suspiciousFormInput'], (result) => {
+      const behavior = {
+        redirects: redirectCount,
+        suspiciousFormInput: result.behavior_suspiciousFormInput || false
       };
       
-      await sendAnalysisResults(results);
-    } catch (error) {
-      console.error('Page analysis failed:', error);
-    }
+      // Clear behavior flag after reading
+      chrome.storage.local.remove('behavior_suspiciousFormInput');
+
+      sendResponse({
+        url: location.href,
+        scripts: scripts,
+        behavior: behavior
+      });
+    });
+    
+    return true; // Keep message channel open for async response
   }
-
-  setupBehaviorTracking() {
-    // Track form submissions
-    document.addEventListener('submit', (e) => {
-      this.userBehavior.formSubmissions++;
-    });
-
-    // Track link clicks
-    document.addEventListener('click', (e) => {
-      if (e.target.tagName === 'A') {
-        this.userBehavior.linkClicks++;
-      }
-    });
-
-    // Track redirects (requires background script coordination)
-    window.addEventListener('beforeunload', () => {
-      this.userBehavior.redirects++;
-    });
-  }
-}
-
-// Initialize analyzer when DOM is ready
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => new PageAnalyzer().analyzePage());
-} else {
-  new PageAnalyzer().analyzePage();
-}
+});

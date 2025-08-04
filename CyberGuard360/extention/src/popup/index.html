@@ -1,18 +1,66 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CyberGuard360</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <link rel="stylesheet" href="../styles/popup.css">
+    <meta charset="UTF-8">
+    <title>CyberGuard360</title>
+    <link rel="stylesheet" href="popup.css">
 </head>
-<body class="bg-gray-50 min-w-[300px]">
-  <div id="root" class="p-4"></div>
-  
-  <script type="text/babel" data-type="module" src="popup.jsx"></script>
+<body>
+    <div id="app">
+        <div id="auth-view" class="view">
+            <div class="header">
+                <img src="icons/icon48.png" alt="logo">
+                <h1>CyberGuard360</h1>
+            </div>
+            <div class="form-container">
+                <input type="email" id="email" placeholder="Email" required>
+                <input type="password" id="password" placeholder="Password" required>
+                <button id="login-btn">Login</button>
+                <button id="register-btn">Register</button>
+                <p id="auth-error" class="error-message"></p>
+            </div>
+        </div>
+
+        <div id="main-view" class="view hidden">
+            <div class="header">
+                <h3>CyberGuard360</h3>
+                <button id="logout-btn">Logout</button>
+            </div>
+
+            <div class="tabs">
+                <button class="tab-btn active" data-view="scan-view">Scan</button>
+                <button class="tab-btn" data-view="history-view">History</button>
+                <button class="tab-btn" data-view="community-view">Community</button>
+            </div>
+
+            <div id="scan-view" class="tab-content">
+                <button id="scan-btn">Scan Current Page</button>
+                <div id="scan-results-container">
+                    <h4>Security Score: <span id="security-score">N/A</span></h4>
+                    <div id="score-bar-container"><div id="score-bar"></div></div>
+                    <h5>Vulnerabilities:</h5>
+                    <ul id="vulnerabilities-list"></ul>
+                    <h5>Recommendations:</h5>
+                    <ul id="recommendations-list"></ul>
+                </div>
+                 <div class="report-form">
+                    <h5>Report this Site</h5>
+                    <textarea id="report-details" placeholder="Describe suspicious activity..."></textarea>
+                    <button id="submit-report-btn">Submit Anonymously</button>
+                </div>
+            </div>
+
+            <div id="history-view" class="tab-content hidden">
+                <ul id="history-list"></ul>
+            </div>
+
+            <div id="community-view" class="tab-content hidden">
+                <ul id="community-reports-list"></ul>
+            </div>
+             <p id="main-error" class="error-message"></p>
+             <div id="loader" class="hidden"></div>
+        </div>
+    </div>
+    <script src="popup.js"></script>
 </body>
 </html>

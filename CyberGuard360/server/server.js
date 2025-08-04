@@ -1,132 +1,288 @@
-import express from 'express';
-import mongoose from 'mongoose';
-import cors from 'cors';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import dotenv from 'dotenv';
+// =================================================================
+// CyberGuard360 Backend Server
+// =================================================================
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const dotenv = require('dotenv');
+const { body, validationResult } = require('express-validator');
+const rateLimit = require('express-rate-limit');
+const retire = require('retire');
+const axios = require('axios');
 
-// Load environment variables
 dotenv.config();
 
-// Import routes
-import authRoutes from './routes/auth.js';
-import scanRoutes from './routes/scan.js';
-import reportRoutes from './routes/report.js';
-import historyRoutes from './routes/history.js';
-
-// Initialize Express
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// MongoDB Connection Setup
-mongoose.set('strictQuery', false); // Remove deprecation warning
-
-const connectDB = async () => {
-  try {
-    await mongoose.connect(process.env.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      retryWrites: true,
-      w: 'majority'
-    });
-    console.log(' MongoDB Connected');
-  } catch (error) {
-    console.error(' MongoDB Connection Error:', error.message);
-    console.log('\nTroubleshooting:');
-    console.log('1. Verify MONGODB_URI in .env matches Atlas connection string');
-    console.log('2. Check IP whitelist in MongoDB Atlas → Network Access');
-    console.log('3. Confirm database user has read/write permissions');
-    process.exit(1);
-  }
-};
-
-// ... (after all your other routes)
-
-// Root endpoint
-app.get('/', (req, res) => {
-  res.status(200).json({
-    message: 'CyberGuard360 API',
-    version: '1.0.0',
-    endpoints: {
-      auth: '/api/auth',
-      scan: '/api/scan',
-      report: '/api/report',
-      history: '/api/history'
-    },
-    docs: 'https://github.com/yourusername/CyberGuard360/docs'
-  });
-});
-
-// Error Handling (keep this last)
-app.use((err, req, res, next) => {
-  console.error('⚠️ Server Error:', err.stack);
-  res.status(500).json({ 
-    error: 'Internal Server Error'
-  });
-});
-
+// =================================================================
 // Middleware
-app.set('trust proxy', 1); // Required for rate limiting behind proxies
-app.use(helmet());
-app.use(cors({
-  origin: process.env.CORS_ORIGINS?.split(',') || '*'
-}));
+// =================================================================
+app.use(cors());
 app.use(express.json());
 
-// Rate Limiting (100 requests per 15 minutes)
+// Rate Limiter: Basic protection against brute-force attacks
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: 'Too many requests, please try again later.'
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per window
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 app.use(limiter);
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/scan', scanRoutes);
-app.use('/api/report', reportRoutes);
-app.use('/api/history', historyRoutes);
+// =================================================================
+// Database Connection & Schemas
+// =================================================================
+mongoose.connect(process.env.MONGO_URI)
+    .then(() => console.log('MongoDB Connected'))
+    .catch(err => console.error('MongoDB Connection Error:', err));
 
-// Health Check Endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'healthy',
-    dbState: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
-  });
+const UserSchema = new mongoose.Schema({
+    email: { type: String, required: true, unique: true, index: true },
+    password: { type: String, required: true },
 });
 
-// Error Handling
-app.use((err, req, res, next) => {
-  console.error('⚠️ Server Error:', err.stack);
-  res.status(500).json({ 
-    error: 'Internal Server Error',
-    message: process.env.NODE_ENV === 'development' ? err.message : undefined
-  });
+const ScanResultSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    url: { type: String, required: true },
+    vulnerabilities: [{
+        type: { type: String },
+        description: String,
+        severity: String,
+        cveId: String,
+    }],
+    securityScore: { type: Number, required: true },
+    timestamp: { type: Date, default: Date.now, index: true },
 });
 
-// Start Server
-const startServer = async () => {
-  try {
-    await connectDB();
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`📊 Database: ${mongoose.connection.host}/${mongoose.connection.name}`);
-    });
-  } catch (error) {
-    console.error('❌ Server Startup Failed:', error);
-    process.exit(1);
-  }
+const CommunityReportSchema = new mongoose.Schema({
+    url: { type: String, required: true, index: true },
+    reportDetails: { type: String, required: true },
+    anonymousId: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now },
+});
+
+const User = mongoose.model('User', UserSchema);
+const ScanResult = mongoose.model('ScanResult', ScanResultSchema);
+const CommunityReport = mongoose.model('CommunityReport', CommunityReportSchema);
+
+// =================================================================
+// Authentication Middleware
+// =================================================================
+const authMiddleware = (req, res, next) => {
+    const authHeader = req.header('Authorization');
+    if (!authHeader) {
+        return res.status(401).json({ message: 'Access denied. No token provided.' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch (ex) {
+        res.status(400).json({ message: 'Invalid token.' });
+    }
 };
 
-startServer();
+// =================================================================
+// API Routes
+// =================================================================
 
-// Graceful Shutdown
-process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM Received - Shutting down gracefully');
-  mongoose.connection.close(() => {
-    console.log('MongoDB Connection Closed');
-    process.exit(0);
-  });
+// --- User Authentication ---
+app.post('/api/users/register',
+    body('email').isEmail(),
+    body('password').isLength({ min: 6 }),
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        try {
+            let user = await User.findOne({ email: req.body.email });
+            if (user) {
+                return res.status(400).json({ message: 'User already exists.' });
+            }
+
+            const salt = await bcrypt.genSalt(10);
+            const hashedPassword = await bcrypt.hash(req.body.password, salt);
+
+            user = new User({ email: req.body.email, password: hashedPassword });
+            await user.save();
+
+            res.status(201).json({ message: 'User registered successfully.' });
+        } catch (error) {
+            res.status(500).json({ message: 'Server error during registration.' });
+        }
+    }
+);
+
+app.post('/api/users/login',
+    body('email').isEmail(),
+    body('password').notEmpty(),
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        try {
+            const user = await User.findOne({ email: req.body.email });
+            if (!user) {
+                return res.status(400).json({ message: 'Invalid credentials.' });
+            }
+
+            const isMatch = await bcrypt.compare(req.body.password, user.password);
+            if (!isMatch) {
+                return res.status(400).json({ message: 'Invalid credentials.' });
+            }
+
+            const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
+            res.json({ token });
+        } catch (error) {
+            res.status(500).json({ message: 'Server error during login.' });
+        }
+    }
+);
+
+// --- Scanning and History ---
+app.post('/api/scan', authMiddleware, async (req, res) => {
+    const { url, scripts, behavior } = req.body;
+    if (!url) {
+        return res.status(400).json({ message: 'URL is required.' });
+    }
+
+    let vulnerabilities = [];
+    let score = 100;
+    
+    // 1. Retire.js Scan for outdated JS libraries
+    if (scripts && scripts.length > 0) {
+        const repo = retire.newRepo();
+        await Promise.all(scripts.map(scriptUrl => retire.check(scriptUrl, repo)));
+        const retireResults = retire.replace(repo.getResults(), retire.resolve);
+        Object.keys(retireResults).forEach(key => {
+            retireResults[key].results.forEach(result => {
+                vulnerabilities.push({
+                    type: 'Outdated Library',
+                    description: `Vulnerable library found: ${result.component} v${result.version}. Severity: ${result.vulnerabilities[0].severity}.`,
+                    severity: result.vulnerabilities[0].severity,
+                    cveId: (result.vulnerabilities[0].identifiers.CVE || []).join(', ')
+                });
+            });
+        });
+    }
+
+    // 2. Heuristic Phishing/Behavior Analysis
+    if (behavior) {
+        if (behavior.redirects > 2) {
+            vulnerabilities.push({ type: 'Phishing Behavior', description: 'Site caused multiple rapid redirects.', severity: 'High' });
+        }
+        if (behavior.suspiciousFormInput) {
+            vulnerabilities.push({ type: 'Phishing Behavior', description: 'Detected suspicious input in a form (e.g., a URL).', severity: 'Medium' });
+        }
+    }
+    
+    // 3. VirusTotal Domain Reputation Check (Optional)
+    if (process.env.VIRUSTOTAL_API_KEY) {
+        try {
+            const domain = new URL(url).hostname;
+            const response = await axios.get(`https://www.virustotal.com/api/v3/domains/${domain}`, {
+                headers: { 'x-apikey': process.env.VIRUSTOTAL_API_KEY }
+            });
+            const stats = response.data.data.attributes.last_analysis_stats;
+            if (stats.malicious > 0 || stats.suspicious > 0) {
+                vulnerabilities.push({ type: 'Domain Reputation', description: `VirusTotal detected this domain as potentially malicious or suspicious (${stats.malicious} hits).`, severity: 'High' });
+            }
+        } catch (error) {
+            console.log('VirusTotal API error:', error.message); // Log error but don't fail the scan
+        }
+    }
+
+    // 4. Calculate Security Score
+    let vulnerabilityWeight = vulnerabilities.reduce((acc, vuln) => {
+        if (vuln.severity === 'High') return acc + 15;
+        if (vuln.severity === 'Medium') return acc + 10;
+        return acc + 5;
+    }, 0);
+    score -= vulnerabilityWeight;
+    score = Math.max(0, score); // Ensure score doesn't go below 0
+
+    // 5. Generate Recommendations
+    let recommendations = [];
+    if (vulnerabilities.some(v => v.type === 'Phishing Behavior')) {
+        recommendations.push("Be cautious with links and forms on this site. It exhibits phishing-like behavior.");
+    }
+    if (vulnerabilities.some(v => v.type === 'Outdated Library')) {
+        recommendations.push("This site uses outdated software, which could be exploited. Avoid entering sensitive information.");
+    }
+    if (score < 50) {
+        recommendations.push("This site has a low security score. Consider Browse elsewhere or using a VPN for added protection.");
+    }
+    if(recommendations.length === 0) {
+        recommendations.push("Looks good! No major issues detected, but always browse safely.");
+    }
+
+    // 6. Save and send results
+    try {
+        const scanResult = new ScanResult({
+            userId: req.user.id,
+            url,
+            vulnerabilities,
+            securityScore: score,
+        });
+        await scanResult.save();
+
+        res.json({ vulnerabilities, securityScore: score, recommendations });
+    } catch (error) {
+        res.status(500).json({ message: 'Error saving scan results.' });
+    }
 });
+
+app.get('/api/history', authMiddleware, async (req, res) => {
+    try {
+        const history = await ScanResult.find({ userId: req.user.id })
+            .sort({ timestamp: -1 })
+            .limit(20);
+        res.json(history);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching history.' });
+    }
+});
+
+
+// --- Community Reporting ---
+app.post('/api/reports/submit', async (req, res) => {
+    const { url, reportDetails, anonymousId } = req.body;
+    if (!url || !reportDetails || !anonymousId) {
+        return res.status(400).json({ message: 'URL, details, and anonymous ID are required.' });
+    }
+
+    try {
+        const report = new CommunityReport({ url, reportDetails, anonymousId });
+        await report.save();
+        res.status(201).json({ message: 'Report submitted successfully.' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error submitting report.' });
+    }
+});
+
+app.get('/api/reports/community', async (req, res) => {
+    try {
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const reports = await CommunityReport.find({ timestamp: { $gte: oneDayAgo } })
+            .sort({ timestamp: -1 })
+            .limit(50);
+        res.json(reports);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching community reports.' });
+    }
+});
+
+
+// =================================================================
+// Server Start
+// =================================================================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
