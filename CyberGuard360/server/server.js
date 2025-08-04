@@ -89,6 +89,13 @@ const authMiddleware = (req, res, next) => {
 // =================================================================
 // API Routes
 // =================================================================
+app.get('/', (req, res) => {
+    res.json({
+        status: 'online',
+        message: 'CyberGuard360 API is running.',
+        timestamp: new Date().toISOString()
+    });
+});
 
 // --- User Authentication ---
 app.post('/api/users/register',
@@ -280,9 +287,40 @@ app.get('/api/reports/community', async (req, res) => {
     }
 });
 
+// =================================================================
+// Server Start (Robust Debugging Version)
+// =================================================================
+const startServer = async () => {
+    try {
+        // Step 1: Verify that the MONGO_URI is loaded from the .env file
+        if (!process.env.MONGO_URI) {
+            console.error('FATAL ERROR: MONGO_URI is not defined in the .env file.');
+            console.error('Please ensure the .env file exists in the /backend directory and is configured correctly.');
+            process.exit(1); // Exit with an error code
+        }
+        
+        console.log('Attempting to connect to MongoDB...');
+        
+        // Step 2: Attempt to connect to the database
+        await mongoose.connect(process.env.MONGO_URI, {
+            serverSelectionTimeoutMS: 5000 // Timeout after 5 seconds
+        });
+        
+        console.log('SUCCESS: MongoDB Connected.');
 
-// =================================================================
-// Server Start
-// =================================================================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+        // Step 3: Start the Express server only after the DB is connected
+        const PORT = process.env.PORT || 3000;
+        app.listen(PORT, () => console.log(`Server is running and listening on port ${PORT}`));
+
+    } catch (error) {
+        console.error('\n<<<<< FAILED TO START SERVER >>>>>');
+        console.error('An error occurred during server startup. This is often due to an incorrect MONGO_URI, a password error, or an IP address not being whitelisted in MongoDB Atlas.');
+        console.error('\n--- Error Details ---');
+        console.error(error);
+        console.error('---------------------\n');
+        process.exit(1); // Exit with an error code
+    }
+};
+
+// Execute the startup function
+startServer();
