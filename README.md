@@ -122,7 +122,7 @@ MIT License
 
 👨‍💻 Author
 
-GitHub: @00Ajax00
-Email: (Add contact email if desired)
+GitHub: @00Ajax00<br>
+Email: ajayzx000@gmail.com<br>
 Built with 💻 and ☕ by the CyberGuard360 team.
 
