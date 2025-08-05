@@ -1,5 +1,5 @@
 // =================================================================
-// CyberGuard360 Backend Server
+// CyberGuard360 Backend Server - Final Version
 // =================================================================
 const express = require('express');
 const mongoose = require('mongoose');
@@ -22,10 +22,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Rate Limiter: Basic protection against brute-force attacks
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit each IP to 100 requests per window
+    windowMs: 15 * 60 * 1000,
+    max: 100,
     standardHeaders: true,
     legacyHeaders: false,
 });
@@ -75,7 +74,6 @@ const authMiddleware = (req, res, next) => {
     if (!authHeader) {
         return res.status(401).json({ message: 'Access denied. No token provided.' });
     }
-
     const token = authHeader.replace('Bearer ', '');
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -85,6 +83,81 @@ const authMiddleware = (req, res, next) => {
         res.status(400).json({ message: 'Invalid token.' });
     }
 };
+
+const botAuthMiddleware = (req, res, next) => {
+    const apiKey = req.header('x-api-key');
+    if (apiKey && apiKey === process.env.BOT_API_KEY) {
+        next();
+    } else {
+        res.status(401).json({ message: 'Unauthorized: Invalid API Key' });
+    }
+};
+
+// =================================================================
+// Core Scanning Logic (Refactored)
+// =================================================================
+async function performScan(url) {
+    const vulnerabilities = [];
+    let score = 100;
+    let recommendations = [];
+
+    // 1. Scan for vulnerable JS libraries
+    try {
+        const pageResponse = await axios.get(url, { timeout: 15000 });
+        const htmlContent = pageResponse.data;
+        const scriptTagRegex = /<script.*?src=["'](.*?)["']/g;
+        const scriptMatches = [...htmlContent.matchAll(scriptTagRegex)];
+        const scriptUrls = scriptMatches.map(match => new URL(match[1], url).href);
+
+        for (const scriptUrl of scriptUrls) {
+            try {
+                const scriptResponse = await axios.get(scriptUrl, { timeout: 15000 });
+                const findings = retire.scanJs(scriptResponse.data, retire.resolve);
+                if (findings.length > 0) {
+                    findings.forEach(finding => {
+                        finding.results.forEach(result => {
+                            result.vulnerabilities.forEach(vuln => {
+                                vulnerabilities.push({
+                                    type: 'Outdated Library',
+                                    description: `Found: ${result.component} v${result.version} in ${finding.file}`,
+                                    severity: vuln.severity,
+                                    cveId: (vuln.identifiers.CVE || [])[0] || 'N/A'
+                                });
+                            });
+                        });
+                    });
+                }
+            } catch (scriptError) {
+                console.log(`Could not fetch or scan script: ${scriptUrl}`);
+            }
+        }
+    } catch (error) {
+        console.error(`Failed to fetch or analyze main URL ${url}:`, error.message);
+        throw new Error("Failed to fetch or analyze the main URL. It may be offline or blocking scanners.");
+    }
+    
+    // 2. Calculate score
+    let vulnerabilityWeight = vulnerabilities.reduce((acc, vuln) => {
+        if (vuln.severity === 'high' || vuln.severity === 'critical') return acc + 20;
+        if (vuln.severity === 'medium') return acc + 10;
+        return acc + 5;
+    }, 0);
+    score -= vulnerabilityWeight;
+    score = Math.max(0, score);
+
+    // 3. Generate recommendations
+    if (vulnerabilities.length > 0) {
+        recommendations.push("This site uses outdated software which could be exploited.");
+    }
+    if (score < 50) {
+        recommendations.push("This site has a low security score. Proceed with caution.");
+    }
+    if (recommendations.length === 0) {
+        recommendations.push("Looks good! No vulnerable JavaScript libraries detected.");
+    }
+    
+    return { vulnerabilities, securityScore: score, recommendations };
+}
 
 // =================================================================
 // API Routes
@@ -98,174 +171,86 @@ app.get('/', (req, res) => {
 });
 
 // --- User Authentication ---
-app.post('/api/users/register',
-    body('email').isEmail(),
-    body('password').isLength({ min: 6 }),
-    async (req, res) => {
-        const errors = validationResult(req);
-        if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
-        }
-
-        try {
-            let user = await User.findOne({ email: req.body.email });
-            if (user) {
-                return res.status(400).json({ message: 'User already exists.' });
-            }
-
-            const salt = await bcrypt.genSalt(10);
-            const hashedPassword = await bcrypt.hash(req.body.password, salt);
-
-            user = new User({ email: req.body.email, password: hashedPassword });
-            await user.save();
-
-            res.status(201).json({ message: 'User registered successfully.' });
-        } catch (error) {
-            res.status(500).json({ message: 'Server error during registration.' });
-        }
-    }
-);
-
-app.post('/api/users/login',
-    body('email').isEmail(),
-    body('password').notEmpty(),
-    async (req, res) => {
-        const errors = validationResult(req);
-        if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
-        }
-
-        try {
-            const user = await User.findOne({ email: req.body.email });
-            if (!user) {
-                return res.status(400).json({ message: 'Invalid credentials.' });
-            }
-
-            const isMatch = await bcrypt.compare(req.body.password, user.password);
-            if (!isMatch) {
-                return res.status(400).json({ message: 'Invalid credentials.' });
-            }
-
-            const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
-            res.json({ token });
-        } catch (error) {
-            res.status(500).json({ message: 'Server error during login.' });
-        }
-    }
-);
-
-// --- Scanning and History ---
-app.post('/api/scan', authMiddleware, async (req, res) => {
-    const { url, scripts, behavior } = req.body;
-    if (!url) {
-        return res.status(400).json({ message: 'URL is required.' });
-    }
-
-    let vulnerabilities = [];
-    let score = 100;
-    
-    // 1. Retire.js Scan for outdated JS libraries
-    if (scripts && scripts.length > 0) {
-        const repo = retire.newRepo();
-        await Promise.all(scripts.map(scriptUrl => retire.check(scriptUrl, repo)));
-        const retireResults = retire.replace(repo.getResults(), retire.resolve);
-        Object.keys(retireResults).forEach(key => {
-            retireResults[key].results.forEach(result => {
-                vulnerabilities.push({
-                    type: 'Outdated Library',
-                    description: `Vulnerable library found: ${result.component} v${result.version}. Severity: ${result.vulnerabilities[0].severity}.`,
-                    severity: result.vulnerabilities[0].severity,
-                    cveId: (result.vulnerabilities[0].identifiers.CVE || []).join(', ')
-                });
-            });
-        });
-    }
-
-    // 2. Heuristic Phishing/Behavior Analysis
-    if (behavior) {
-        if (behavior.redirects > 2) {
-            vulnerabilities.push({ type: 'Phishing Behavior', description: 'Site caused multiple rapid redirects.', severity: 'High' });
-        }
-        if (behavior.suspiciousFormInput) {
-            vulnerabilities.push({ type: 'Phishing Behavior', description: 'Detected suspicious input in a form (e.g., a URL).', severity: 'Medium' });
-        }
-    }
-    
-    // 3. VirusTotal Domain Reputation Check (Optional)
-    if (process.env.VIRUSTOTAL_API_KEY) {
-        try {
-            const domain = new URL(url).hostname;
-            const response = await axios.get(`https://www.virustotal.com/api/v3/domains/${domain}`, {
-                headers: { 'x-apikey': process.env.VIRUSTOTAL_API_KEY }
-            });
-            const stats = response.data.data.attributes.last_analysis_stats;
-            if (stats.malicious > 0 || stats.suspicious > 0) {
-                vulnerabilities.push({ type: 'Domain Reputation', description: `VirusTotal detected this domain as potentially malicious or suspicious (${stats.malicious} hits).`, severity: 'High' });
-            }
-        } catch (error) {
-            console.log('VirusTotal API error:', error.message); // Log error but don't fail the scan
-        }
-    }
-
-    // 4. Calculate Security Score
-    let vulnerabilityWeight = vulnerabilities.reduce((acc, vuln) => {
-        if (vuln.severity === 'High') return acc + 15;
-        if (vuln.severity === 'Medium') return acc + 10;
-        return acc + 5;
-    }, 0);
-    score -= vulnerabilityWeight;
-    score = Math.max(0, score); // Ensure score doesn't go below 0
-
-    // 5. Generate Recommendations
-    let recommendations = [];
-    if (vulnerabilities.some(v => v.type === 'Phishing Behavior')) {
-        recommendations.push("Be cautious with links and forms on this site. It exhibits phishing-like behavior.");
-    }
-    if (vulnerabilities.some(v => v.type === 'Outdated Library')) {
-        recommendations.push("This site uses outdated software, which could be exploited. Avoid entering sensitive information.");
-    }
-    if (score < 50) {
-        recommendations.push("This site has a low security score. Consider Browse elsewhere or using a VPN for added protection.");
-    }
-    if(recommendations.length === 0) {
-        recommendations.push("Looks good! No major issues detected, but always browse safely.");
-    }
-
-    // 6. Save and send results
+app.post('/api/users/register', body('email').isEmail(), body('password').isLength({ min: 6 }), async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
-        const scanResult = new ScanResult({
-            userId: req.user.id,
-            url,
-            vulnerabilities,
-            securityScore: score,
-        });
-        await scanResult.save();
-
-        res.json({ vulnerabilities, securityScore: score, recommendations });
+        if (await User.findOne({ email: req.body.email })) return res.status(400).json({ message: 'User already exists.' });
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(req.body.password, salt);
+        const user = new User({ email: req.body.email, password: hashedPassword });
+        await user.save();
+        res.status(201).json({ message: 'User registered successfully.' });
     } catch (error) {
-        res.status(500).json({ message: 'Error saving scan results.' });
+        res.status(500).json({ message: 'Server error during registration.' });
     }
 });
 
+app.post('/api/users/login', body('email').isEmail(), body('password').notEmpty(), async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+        const user = await User.findOne({ email: req.body.email });
+        if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
+            return res.status(400).json({ message: 'Invalid credentials.' });
+        }
+        const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        res.json({ token });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error during login.' });
+    }
+});
+
+// --- Scanning Endpoints ---
+// Endpoint for the browser extension (requires user login)
+app.post('/api/scan', authMiddleware, async (req, res) => {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ message: 'URL is required.' });
+
+    try {
+        const scanData = await performScan(url);
+        // Save results to the specific user's history
+        const scanResult = new ScanResult({
+            userId: req.user.id,
+            url,
+            vulnerabilities: scanData.vulnerabilities,
+            securityScore: scanData.securityScore,
+        });
+        await scanResult.save();
+        res.json(scanData);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// Endpoint for the Discord bot (requires API key)
+app.post('/api/bot-scan', botAuthMiddleware, async (req, res) => {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ message: 'URL is required.' });
+
+    try {
+        const scanData = await performScan(url);
+        // We don't save bot scans to any user history, just return the data
+        res.json(scanData);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+
+// --- History & Community Reporting ---
 app.get('/api/history', authMiddleware, async (req, res) => {
     try {
-        const history = await ScanResult.find({ userId: req.user.id })
-            .sort({ timestamp: -1 })
-            .limit(20);
+        const history = await ScanResult.find({ userId: req.user.id }).sort({ timestamp: -1 }).limit(20);
         res.json(history);
     } catch (error) {
         res.status(500).json({ message: 'Error fetching history.' });
     }
 });
 
-
-// --- Community Reporting ---
 app.post('/api/reports/submit', async (req, res) => {
     const { url, reportDetails, anonymousId } = req.body;
-    if (!url || !reportDetails || !anonymousId) {
-        return res.status(400).json({ message: 'URL, details, and anonymous ID are required.' });
-    }
-
+    if (!url || !reportDetails || !anonymousId) return res.status(400).json({ message: 'URL, details, and anonymous ID are required.' });
     try {
         const report = new CommunityReport({ url, reportDetails, anonymousId });
         await report.save();
@@ -278,9 +263,7 @@ app.post('/api/reports/submit', async (req, res) => {
 app.get('/api/reports/community', async (req, res) => {
     try {
         const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const reports = await CommunityReport.find({ timestamp: { $gte: oneDayAgo } })
-            .sort({ timestamp: -1 })
-            .limit(50);
+        const reports = await CommunityReport.find({ timestamp: { $gte: oneDayAgo } }).sort({ timestamp: -1 }).limit(50);
         res.json(reports);
     } catch (error) {
         res.status(500).json({ message: 'Error fetching community reports.' });
@@ -288,39 +271,37 @@ app.get('/api/reports/community', async (req, res) => {
 });
 
 // =================================================================
-// Server Start (Robust Debugging Version)
+// Server Start
 // =================================================================
 const startServer = async () => {
     try {
-        // Step 1: Verify that the MONGO_URI is loaded from the .env file
+        console.log("--- RENDER SERVER DEBUG ---");
+        console.log(`BOT_API_KEY loaded: ${process.env.BOT_API_KEY ? `Yes. Starts with: '${process.env.BOT_API_KEY.substring(0, 5)}'` : 'NO, IT IS UNDEFINED!'}`);
+        console.log("--------------------------");
+
         if (!process.env.MONGO_URI) {
             console.error('FATAL ERROR: MONGO_URI is not defined in the .env file.');
-            console.error('Please ensure the .env file exists in the /backend directory and is configured correctly.');
-            process.exit(1); // Exit with an error code
+            process.exit(1);
         }
         
         console.log('Attempting to connect to MongoDB...');
-        
-        // Step 2: Attempt to connect to the database
-        await mongoose.connect(process.env.MONGO_URI, {
-            serverSelectionTimeoutMS: 5000 // Timeout after 5 seconds
-        });
-        
+        await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 15000 });
         console.log('SUCCESS: MongoDB Connected.');
 
-        // Step 3: Start the Express server only after the DB is connected
         const PORT = process.env.PORT || 3000;
         app.listen(PORT, () => console.log(`Server is running and listening on port ${PORT}`));
-
     } catch (error) {
         console.error('\n<<<<< FAILED TO START SERVER >>>>>');
-        console.error('An error occurred during server startup. This is often due to an incorrect MONGO_URI, a password error, or an IP address not being whitelisted in MongoDB Atlas.');
-        console.error('\n--- Error Details ---');
-        console.error(error);
+        console.error('Error Details:', error);
         console.error('---------------------\n');
-        process.exit(1); // Exit with an error code
+        process.exit(1);
     }
 };
 
-// Execute the startup function
-startServer();
+// Only start the server if this file is run directly
+if (require.main === module) {
+    startServer();
+}
+
+// Export the app for testing purposes
+module.exports = app;
