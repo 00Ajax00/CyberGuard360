@@ -116,7 +116,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // 1. Get page data from content script
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const pageData = await chrome.runtime.sendMessage({ action: 'getPageDataForScan', tabId: tab.id });
+        const pageData = await chrome.tabs.sendMessage(tab.id, { action: 'getPageDataForScan' });
 
         // 2. Send data to background script for API call
         const response = await chrome.runtime.sendMessage({ action: 'api/scan', data: pageData });
